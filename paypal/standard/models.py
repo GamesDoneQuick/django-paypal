@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from django.conf import settings
+from __future__ import unicode_literals
+
 from django.db import models
 from django.utils.functional import cached_property
 
-from paypal.standard.helpers import duplicate_txn_id, check_secret
 from paypal.standard.conf import POSTBACK_ENDPOINT, SANDBOX_POSTBACK_ENDPOINT
+from paypal.standard.helpers import check_secret, duplicate_txn_id
+from paypal.utils import warn_untested
 
 ST_PP_ACTIVE = 'Active'
 ST_PP_CANCELLED = 'Cancelled'
@@ -38,12 +40,13 @@ DEFAULT_ENCODING = 'windows-1252'  # PayPal seems to normally use this.
 
 
 class PayPalStandardBase(Model):
-    """Meta class for common variables shared by IPN and PDT"""
+    """Base class for common variables shared by IPN and PDT"""
     # See https://developer.paypal.com/docs/classic/ipn/integration-guide/IPNandPDTVariables/
 
     # @@@ Might want to add all these one distant day.
     # FLAG_CODE_CHOICES = (
-    # PAYMENT_STATUS_CHOICES = "Canceled_ Reversal Completed Denied Expired Failed Pending Processed Refunded Reversed Voided".split()
+    # PAYMENT_STATUS_CHOICES = "Canceled_ Reversal Completed Denied Expired " \
+    #                          "Failed Pending Processed Refunded Reversed Voided".split()
     PAYMENT_STATUS_CHOICES = [ST_PP_ACTIVE,
                               ST_PP_CANCELLED,
                               ST_PP_CANCELED_REVERSAL,
@@ -64,7 +67,7 @@ class PayPalStandardBase(Model):
                               ST_PP_UNCLAIMED,
                               ST_PP_UNCLEARED,
                               ST_PP_VOIDED,
-                             ]
+                              ]
     # AUTH_STATUS_CHOICES = "Completed Pending Voided".split()
     # ADDRESS_STATUS_CHOICES = "confirmed unconfirmed".split()
     # PAYER_STATUS_CHOICES = "verified / unverified".split()
@@ -122,6 +125,8 @@ class PayPalStandardBase(Model):
     num_cart_items = models.IntegerField(blank=True, default=0, null=True)
     option_name1 = models.CharField(max_length=64, blank=True)
     option_name2 = models.CharField(max_length=64, blank=True)
+    option_selection1 = models.CharField(max_length=200, blank=True)
+    option_selection2 = models.CharField(max_length=200, blank=True)
     payer_status = models.CharField(max_length=255, blank=True)
     payment_date = models.DateTimeField(blank=True, null=True, help_text="HH:MM:SS DD Mmm YY, YYYY PST")
     payment_gross = models.DecimalField(max_digits=64, decimal_places=2, default=0, blank=True, null=True)
@@ -151,7 +156,7 @@ class PayPalStandardBase(Model):
     initial_payment_amount = models.DecimalField(max_digits=64, decimal_places=2, default=0, blank=True, null=True)
     next_payment_date = models.DateTimeField(blank=True, null=True, help_text="HH:MM:SS DD Mmm YY, YYYY PST")
     outstanding_balance = models.DecimalField(max_digits=64, decimal_places=2, default=0, blank=True, null=True)
-    payment_cycle = models.CharField(max_length=255, blank=True) #Monthly
+    payment_cycle = models.CharField(max_length=255, blank=True)  # Monthly
     period_type = models.CharField(max_length=255, blank=True)
     product_name = models.CharField(max_length=255, blank=True)
     product_type = models.CharField(max_length=255, blank=True)
@@ -181,7 +186,7 @@ class PayPalStandardBase(Model):
     username = models.CharField(max_length=64, blank=True)
 
     # Billing Agreement Variables
-    mp_id = models.CharField(max_length=128, blank=True, null=True) # B-0G433009BJ555711U
+    mp_id = models.CharField(max_length=128, blank=True, null=True)  # B-0G433009BJ555711U
 
     # Dispute Resolution Variables
     case_creation_date = models.DateTimeField(blank=True, null=True, help_text="HH:MM:SS DD Mmm YY, YYYY PST")
@@ -228,11 +233,13 @@ class PayPalStandardBase(Model):
 
     class Meta:
         abstract = True
-        app_label = 'paypal_standard_base' # Keep Django 1.7 quiet
+        app_label = 'paypal_standard_base'
 
     def __unicode__(self):
         if self.is_transaction():
             return self.format % ("Transaction", self.txn_id)
+        elif self.is_subscription():
+            return self.format % ("Subscription", self.subscr_id)
         else:
             return self.format % ("Recurring", self.recurring_payment_id)
 
@@ -264,16 +271,32 @@ class PayPalStandardBase(Model):
     def is_recurring(self):
         return len(self.recurring_payment_id) > 0
 
+    def is_subscription(self):
+        warn_untested()
+        return len(self.subscr_id) > 0
+
+    def is_subscription_payment(self):
+        warn_untested()
+        return self.txn_type == "subscr_payment"
+
+    def is_subscription_failed(self):
+        warn_untested()
+        return self.txn_type == "subscr_failed"
+
     def is_subscription_cancellation(self):
+        warn_untested()
         return self.txn_type == "subscr_cancel"
 
     def is_subscription_end_of_term(self):
+        warn_untested()
         return self.txn_type == "subscr_eot"
 
     def is_subscription_modified(self):
+        warn_untested()
         return self.txn_type == "subscr_modify"
 
     def is_subscription_signup(self):
+        warn_untested()
         return self.txn_type == "subscr_signup"
 
     def is_recurring_create(self):
@@ -292,18 +315,23 @@ class PayPalStandardBase(Model):
         return self.txn_type == "recurring_payment_failed"
 
     def is_recurring_suspended(self):
+        warn_untested()
         return self.txn_type == "recurring_payment_suspended"
 
     def is_recurring_suspended_due_to_max_failed_payment(self):
+        warn_untested()
         return self.txn_type == "recurring_payment_suspended_due_to_max_failed_payment"
 
     def is_billing_agreement(self):
+        warn_untested()
         return len(self.mp_id) > 0
 
     def is_billing_agreement_create(self):
+        warn_untested()
         return self.txn_type == "mp_signup"
 
     def is_billing_agreement_cancel(self):
+        warn_untested()
         return self.txn_type == "mp_cancel"
 
     def set_flag(self, info, code=None):
@@ -311,41 +339,34 @@ class PayPalStandardBase(Model):
         self.flag = True
         self.flag_info += info
         if code is not None:
+            warn_untested()
             self.flag_code = code
 
-    def verify(self, item_check_callable=None, business=None):
+    def clear_flag(self):
+        self.flag = False
+        self.flag_info = ""
+        self.flag_code = ""
+
+    def verify(self):
         """
         Verifies an IPN and a PDT.
         Checks for obvious signs of weirdness in the payment and flags appropriately.
-
-        Provide a callable that takes an instance of this class as a parameter and returns
-        a tuple (False, None) if the item is valid. Should return (True, "reason") if the
-        item isn't valid. Strange but backward compatible :) This function should check
-        that `mc_gross`, `mc_currency` `item_name` and `item_number` are all correct.
-
         """
-        if business == None:
-            business = getattr(settings, 'RECEIVER_EMAIL')
         self.response = self._postback().decode('ascii')
+        self.clear_flag()
         self._verify_postback()
         if not self.flag:
             if self.is_transaction():
                 if self.payment_status not in self.PAYMENT_STATUS_CHOICES:
                     self.set_flag("Invalid payment_status. (%s)" % self.payment_status)
-                if (self.business and self.business.lower() != business.lower()) or (not self.business and self.receiver_email.lower() != business.lower()):
-                    self.set_flag("Business email mismatch. (%s)" % self.business)
-                if callable(item_check_callable):
-                    flag, reason = item_check_callable(self)
-                    if flag:
-                        self.set_flag(reason)
-            else:
-                # @@@ Run a different series of checks on recurring payments.
-                pass
+                if duplicate_txn_id(self):
+                    self.set_flag("Duplicate txn_id. (%s)" % self.txn_id)
 
         self.save()
 
     def verify_secret(self, form_instance, secret):
         """Verifies an IPN payment over SSL using EWP."""
+        warn_untested()
         if not check_secret(form_instance, secret):
             self.set_flag("Invalid secret. (%s)") % secret
         self.save()

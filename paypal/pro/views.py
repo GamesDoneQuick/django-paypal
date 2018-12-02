@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-import warnings
-
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 
-from paypal.pro.forms import PaymentForm, ConfirmForm
-from paypal.pro.helpers import PayPalWPP, express_endpoint_for_token
 from paypal.pro.exceptions import PayPalFailure
+from paypal.pro.forms import ConfirmForm, PaymentForm
+from paypal.pro.helpers import PayPalWPP, express_endpoint_for_token
+from paypal.utils import warn_untested
 
 
 class PayPalPro(object):
@@ -87,12 +86,6 @@ class PayPalPro(object):
         self.form_context_name = form_context_name
         self.nvp_handler = nvp_handler
 
-        if nvp_handler is None:
-            warnings.warn(
-                "You didn't pass `nvp_handler` to PayPalPro. You should pass a callback "
-                "here instead of using the `payment_was_successful` "
-                "signal", DeprecationWarning)
-
     def __call__(self, request):
         """Return the appropriate response for the state of the transaction."""
         self.request = request
@@ -137,6 +130,7 @@ class PayPalPro(object):
 
     def validate_payment_form(self):
         """Try to validate and then process the DirectPayment form."""
+        warn_untested()
         form = self.payment_form_cls(self.request.POST)
         if form.is_valid():
             success = form.process(self.request, self.item)
@@ -158,6 +152,7 @@ class PayPalPro(object):
         try:
             nvp_obj = wpp.setExpressCheckout(self.item)
         except PayPalFailure:
+            warn_untested()
             self.context['errors'] = self.errors['paypal']
             return self.render_payment_form()
         else:
@@ -168,6 +163,7 @@ class PayPalPro(object):
         Second step of ExpressCheckout. Display an order confirmation form which
         contains hidden fields with the token / PayerID from PayPal.
         """
+        warn_untested()
         initial = dict(token=self.request.GET['token'], PayerID=self.request.GET['PayerID'])
         self.context[self.form_context_name] = self.confirm_form_cls(initial=initial)
         return TemplateResponse(self.request, self.confirm_template, self.context)
@@ -184,6 +180,7 @@ class PayPalPro(object):
         # @@@ This check and call could be moved into PayPalWPP.
         try:
             if self.is_recurring():
+                warn_untested()
                 nvp = wpp.createRecurringPaymentsProfile(self.item)
             else:
                 nvp = wpp.doExpressCheckoutPayment(self.item)
@@ -195,5 +192,4 @@ class PayPalPro(object):
             return HttpResponseRedirect(self.success_url)
 
     def handle_nvp(self, nvp):
-        if self.nvp_handler is not None:
-            self.nvp_handler(nvp)
+        self.nvp_handler(nvp)

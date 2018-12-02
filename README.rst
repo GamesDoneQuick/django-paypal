@@ -5,8 +5,8 @@ Django PayPal
     :target: https://travis-ci.org/spookylukey/django-paypal
     :alt: Build Status
 
-.. image:: https://pypip.in/v/django-paypal/badge.png
-    :target: https://pypi.python.org/pypi/django-paypal
+.. image:: https://badge.fury.io/py/django-paypal.svg
+    :target: https://badge.fury.io/py/django-paypal
     :alt: Latest PyPI version
 
 Django PayPal is a pluggable application that integrates with PayPal Payments
@@ -14,31 +14,40 @@ Standard and Payments Pro.
 
 See https://django-paypal.readthedocs.org/ for documentation.
 
-django-paypal supports Python 2.7, 3.3 and 3.4, and Django from version 1.6 to 1.8.
+django-paypal supports:
 
-Please read the docs if you are upgrading from Django 1.7
+* Django 1.11+
+* Python 2.7, and 3.4+
 
+(Not all combinations are supported).
 
-Contributing to django-paypal
-=============================
+Project status
+==============
 
-If you want to contribute (yay!), please create a fork and start a branch off
-'master' for your changes. Submit a PR on GitHub to request that it is merged.
+This project is *active* but in *maintenance mode*. The maintainers see their
+primary responsibilities as:
 
-All bug fixes and new features will require tests to accompany them, unless it
-is very difficult to write the test (e.g. non deterministic behaviour). The
-tests should fail without the fix/feature.
+* fixing any critical data loss or security bugs.
+* keeping the project up-to-date with new versions of Django (or other
+  dependencies).
+* merging well written patches from the community, and doing so promptly.
 
-Please add to CHANGES.rst for any significant bug fixes or new features. This
-file becomes part of the PyPI description for the package.
+Large scale development work and feature additions are not planned by the
+maintainers.
 
-New features need documentation adding in docs/
+Some important parts of the code base are not covered by automated tests, and
+may be broken for some versions of Django or Python. These parts of the code
+base currently issue warnings, and the maintainers are waiting for tests to be
+contributed by those who actually need those parts, and docs where appropriate.
 
-See docs/tests.rst for info about running the test suite.
+Please bear these things in mind if filing an issue. If you discover a bug,
+unless it is a critical data loss or security bug, the maintainers are unlikely
+to work for free to fix it, and a new feature, or tests for existing
+functionality, will only be added by the maintainers if they need it themselves.
 
-If you make changes to the models, please create migrations for both Django 1.7+
-and South e.g.::
+That said, if you do have large changes that you want to contribute, including
+large new features (such as implementing newer PayPal payment methods), they
+will be gladly accepted if they are implemented well.
 
-    ./manage.py makemigrations ipn
-
-    ./manage.py schemamigration --auto ipn
+Please see `CONTRIBUTING.rst <CONTRIBUTING.rst>`_ for more information about
+using the issue tracker and pull requests.

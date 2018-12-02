@@ -2,18 +2,22 @@
 # -*- coding: utf-8 -*-
 import logging
 from datetime import datetime
+from warnings import warn
 
 from django import forms
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
+from django.utils.translation import ugettext_lazy as _
 
-from paypal.standard.conf import (DONATION_IMAGE, DONATION_SANDBOX_IMAGE,
-                                  IMAGE, POSTBACK_ENDPOINT, SANDBOX_IMAGE,
-                                  SANDBOX_POSTBACK_ENDPOINT,
-                                  SUBSCRIPTION_IMAGE,
-                                  SUBSCRIPTION_SANDBOX_IMAGE)
-from paypal.standard.widgets import ReservedValueHiddenInput, ValueHiddenInput
+from paypal.standard.conf import (
+    BUY_BUTTON_IMAGE, DONATION_BUTTON_IMAGE, PAYPAL_CERT, PAYPAL_CERT_ID, PAYPAL_PRIVATE_CERT, PAYPAL_PUBLIC_CERT,
+    POSTBACK_ENDPOINT, SANDBOX_POSTBACK_ENDPOINT, SUBSCRIPTION_BUTTON_IMAGE
+)
+from paypal.standard.widgets import ValueHiddenInput
+from paypal.utils import warn_untested
 
 log = logging.getLogger(__name__)
 
@@ -49,18 +53,28 @@ class PayPalDateTimeField(forms.DateTimeField):
 
         value = value.strip()
 
-        time_part, month_part, day_part, year_part, zone_part = value.split(" ")
-        month_part = month_part.strip(".")
-        day_part = day_part.strip(",")
-        month = MONTHS.index(month_part) + 1
-        day = int(day_part)
-        year = int(year_part)
-        hour, minute, second = map(int, time_part.split(":"))
-        dt = datetime(year, month, day, hour, minute, second)
+        try:
+            time_part, month_part, day_part, year_part, zone_part = value.split()
+            month_part = month_part.strip(".")
+            day_part = day_part.strip(",")
+            month = MONTHS.index(month_part) + 1
+            day = int(day_part)
+            year = int(year_part)
+            hour, minute, second = map(int, time_part.split(":"))
+            dt = datetime(year, month, day, hour, minute, second)
+        except ValueError as e:
+            raise ValidationError(
+                _("Invalid date format %(value)s: %(e)s"),
+                params={'value': value, 'e': e},
+                code="invalid_date"
+            )
+
         if zone_part in ["PDT", "PST"]:
             # PST/PDT is 'US/Pacific'
             dt = timezone.pytz.timezone('US/Pacific').localize(
                 dt, is_dst=zone_part == 'PDT')
+            if not settings.USE_TZ:
+                dt = timezone.make_naive(dt, timezone=timezone.utc)
         return dt
 
 
@@ -82,7 +96,9 @@ class PayPalPaymentsForm(forms.Form):
         ("_xclick", "Buy now or Donations"),
         ("_donations", "Donations"),
         ("_cart", "Shopping cart"),
-        ("_xclick-subscriptions", "Subscribe")
+        ("_xclick-subscriptions", "Subscribe"),
+        ("_xclick-auto-billing", "Automatic Billing"),
+        ("_xclick-payment-plan", "Installment Plan"),
     )
     SHIPPING_CHOICES = ((1, "No shipping"), (0, "Shipping"))
     NO_NOTE_CHOICES = ((1, "No Note"), (0, "Include Note"))
@@ -99,43 +115,6 @@ class PayPalPaymentsForm(forms.Form):
     SUBSCRIBE = 'subscribe'
     DONATE = 'donate'
 
-    # Where the money goes.
-    business = forms.CharField(widget=ValueHiddenInput())
-
-    # Item information.
-    amount = forms.IntegerField(widget=ValueHiddenInput())
-    item_name = forms.CharField(widget=ValueHiddenInput())
-    item_number = forms.CharField(widget=ValueHiddenInput())
-    quantity = forms.CharField(widget=ValueHiddenInput())
-
-    # Subscription Related.
-    a1 = forms.CharField(widget=ValueHiddenInput())  # Trial 1 Price
-    p1 = forms.CharField(widget=ValueHiddenInput())  # Trial 1 Duration
-    t1 = forms.CharField(widget=ValueHiddenInput())  # Trial 1 unit of Duration, default to Month
-    a2 = forms.CharField(widget=ValueHiddenInput())  # Trial 2 Price
-    p2 = forms.CharField(widget=ValueHiddenInput())  # Trial 2 Duration
-    t2 = forms.CharField(widget=ValueHiddenInput())  # Trial 2 unit of Duration, default to Month
-    a3 = forms.CharField(widget=ValueHiddenInput())  # Subscription Price
-    p3 = forms.CharField(widget=ValueHiddenInput())  # Subscription Duration
-    t3 = forms.CharField(widget=ValueHiddenInput())  # Subscription unit of Duration, default to Month
-    src = forms.CharField(widget=ValueHiddenInput()) # Is billing recurring? default to yes
-    sra = forms.CharField(widget=ValueHiddenInput()) # Reattempt billing on failed cc transaction
-    no_note = forms.CharField(widget=ValueHiddenInput(), initial=NO_NOTE_CHOICES[0][0])
-    # Can be either 1 or 2. 1 = modify or allow new subscription creation, 2 = modify only
-    modify = forms.IntegerField(widget=ValueHiddenInput()) # Are we modifying an existing subscription?
-
-    # Localization / PayPal Setup
-    lc = forms.CharField(widget=ValueHiddenInput())
-    page_style = forms.CharField(widget=ValueHiddenInput())
-    cbt = forms.CharField(widget=ValueHiddenInput())
-
-    # IPN control.
-    notify_url = forms.CharField(widget=ValueHiddenInput())
-    cancel_return = forms.CharField(widget=ValueHiddenInput())
-    return_url = forms.CharField(widget=ReservedValueHiddenInput(attrs={"name": "return"}))
-    custom = forms.CharField(widget=ValueHiddenInput())
-    invoice = forms.CharField(widget=ValueHiddenInput())
-
     # Default fields.
     cmd = forms.ChoiceField(widget=forms.HiddenInput(), initial=CMD_CHOICES[0][0])
     charset = forms.CharField(widget=forms.HiddenInput(), initial="utf-8")
@@ -147,11 +126,20 @@ class PayPalPaymentsForm(forms.Form):
         super(PayPalPaymentsForm, self).__init__(*args, **kwargs)
         self.button_type = button_type
         if 'initial' in kwargs:
+            kwargs['initial'] = self._fix_deprecated_return_url(kwargs['initial'])
             # Dynamically create, so we can support everything PayPal does.
             for k, v in kwargs['initial'].items():
                 if k not in self.base_fields:
                     self.fields[k] = forms.CharField(label=k, widget=ValueHiddenInput(), initial=v)
         self.sandbox = sandbox if sandbox != None else getattr(settings, 'PAYPAL_TEST', True)
+
+    def _fix_deprecated_return_url(self, initial_args):
+        if 'return_url' in initial_args:
+            warn("""The use of the initial['return_url'] is Deprecated.
+                    Please use initial['return'] instead""", DeprecationWarning)
+            initial_args['return'] = initial_args['return_url']
+            del initial_args['return_url']
+        return initial_args
 
     def test_mode(self):
         return self.sandbox
@@ -169,30 +157,23 @@ class PayPalPaymentsForm(forms.Form):
     <input type="image" src="{2}" border="0" name="submit" alt="Buy it Now" />
 </form>""", self.get_endpoint(), self.as_p(), self.get_image())
 
-    def sandbox(self):
-        "Deprecated.  Use self.render() instead."
-        import warnings
-        warnings.warn("""PaypalPaymentsForm.sandbox() is deprecated.
-                    Use the render() method instead.""", DeprecationWarning)
-        return self.render()
-
     def get_image(self):
         return {
-            (True, self.SUBSCRIBE): SUBSCRIPTION_SANDBOX_IMAGE,
-            (True, self.BUY): SANDBOX_IMAGE,
-            (True, self.DONATE): DONATION_SANDBOX_IMAGE,
-            (False, self.SUBSCRIBE): SUBSCRIPTION_IMAGE,
-            (False, self.BUY): IMAGE,
-            (False, self.DONATE): DONATION_IMAGE,
-        }[self.test_mode(), self.button_type]
+            self.SUBSCRIBE: SUBSCRIPTION_BUTTON_IMAGE,
+            self.BUY: BUY_BUTTON_IMAGE,
+            self.DONATE: DONATION_BUTTON_IMAGE,
+        }[self.button_type]
 
     def is_transaction(self):
+        warn_untested()
         return not self.is_subscription()
 
     def is_donation(self):
+        warn_untested()
         return self.button_type == self.DONATE
 
     def is_subscription(self):
+        warn_untested()
         return self.button_type == self.SUBSCRIBE
 
 
@@ -206,17 +187,20 @@ class PayPalEncryptedPaymentsForm(PayPalPaymentsForm):
 
     """
 
+    def __init__(self, private_cert=PAYPAL_PRIVATE_CERT, public_cert=PAYPAL_PUBLIC_CERT,
+            paypal_cert=PAYPAL_CERT, cert_id=PAYPAL_CERT_ID, *args, **kwargs):
+        super(PayPalEncryptedPaymentsForm, self).__init__(*args, **kwargs)
+        self.private_cert = private_cert
+        self.public_cert = public_cert
+        self.paypal_cert = paypal_cert
+        self.cert_id = cert_id
+
     def _encrypt(self):
         """Use your key thing to encrypt things."""
         from M2Crypto import BIO, SMIME, X509
-        # @@@ Could we move this to conf.py?
-        CERT = settings.PAYPAL_PRIVATE_CERT
-        PUB_CERT = settings.PAYPAL_PUBLIC_CERT
-        PAYPAL_CERT = settings.PAYPAL_CERT
-        CERT_ID = settings.PAYPAL_CERT_ID
 
         # Iterate through the fields and pull out the ones that have a value.
-        plaintext = 'cert_id=%s\n' % CERT_ID
+        plaintext = 'cert_id=%s\n' % self.cert_id
         for name, field in self.fields.items():
             value = None
             if name in self.initial:
@@ -224,17 +208,14 @@ class PayPalEncryptedPaymentsForm(PayPalPaymentsForm):
             elif field.initial is not None:
                 value = field.initial
             if value is not None:
-                # @@@ Make this less hackish and put it in the widget.
-                if name == "return_url":
-                    name = "return"
                 plaintext += u'%s=%s\n' % (name, value)
         plaintext = plaintext.encode('utf-8')
 
         # Begin crypto weirdness.
         s = SMIME.SMIME()
-        s.load_key_bio(BIO.openfile(CERT), BIO.openfile(PUB_CERT))
+        s.load_key_bio(BIO.openfile(self.private_cert), BIO.openfile(self.public_cert))
         p7 = s.sign(BIO.MemoryBuffer(plaintext), flags=SMIME.PKCS7_BINARY)
-        x509 = X509.load_cert_bio(BIO.openfile(PAYPAL_CERT))
+        x509 = X509.load_cert_bio(BIO.openfile(self.paypal_cert))
         sk = X509.X509_Stack()
         sk.push(x509)
         s.set_x509_stack(sk)
@@ -244,7 +225,7 @@ class PayPalEncryptedPaymentsForm(PayPalPaymentsForm):
         p7 = s.encrypt(tmp, flags=SMIME.PKCS7_BINARY)
         out = BIO.MemoryBuffer()
         p7.write(out)
-        return out.read()
+        return out.read().decode()
 
     def as_p(self):
         return mark_safe(u"""
@@ -264,6 +245,7 @@ class PayPalSharedSecretEncryptedPaymentsForm(PayPalEncryptedPaymentsForm):
 
     def __init__(self, *args, **kwargs):
         "Make the secret from the form initial data and slip it into the form."
+        warn_untested()
         from paypal.standard.helpers import make_secret
 
         super(PayPalSharedSecretEncryptedPaymentsForm, self).__init__(*args, **kwargs)

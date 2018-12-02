@@ -10,7 +10,7 @@ views.py:
 
     paypal_dict = {
        "cmd": "_xclick-subscriptions",
-       "business": settings.PAYPAL_RECEIVER_EMAIL,
+       "business": 'receiver_email@example.com',
        "a3": "9.99",                      # monthly price
        "p3": 1,                           # duration of each unit (depends on unit)
        "t3": "M",                         # duration unit ("M for Month")
@@ -19,7 +19,7 @@ views.py:
        "no_note": "1",                    # remove extra notes (optional)
        "item_name": "my cool subscription",
        "notify_url": "http://www.example.com/your-ipn-location/",
-       "return_url": "http://www.example.com/your-return-location/",
+       "return": "http://www.example.com/your-return-location/",
        "cancel_return": "http://www.example.com/your-cancel-location/",
    }
 
@@ -29,3 +29,6 @@ views.py:
    # Output the button.
    form.render()
 
+
+See `PayPal Subscribe button docs
+<https://developer.paypal.com/docs/classic/paypal-payments-standard/integration-guide/subscribe_buttons/>`_.

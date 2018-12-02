@@ -2,27 +2,16 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-from django.shortcuts import render
-from django.views.decorators.http import require_GET
-from paypal.standard.pdt.models import PayPalPDT
 from paypal.standard.pdt.forms import PayPalPDTForm
+from paypal.standard.pdt.models import PayPalPDT
+from paypal.utils import warn_untested
 
 
-@require_GET
-def pdt(request, item_check_callable=None, template="pdt/pdt.html", context=None):
-    """Standard implementation of a view that processes PDT and then renders a template
-    For more advanced uses, create your own view and call process_pdt.
+def process_pdt(request):
     """
-    pdt_obj, failed = process_pdt(request, item_check_callable)
+    Payment data transfer implementation:
+    https://developer.paypal.com/webapps/developer/docs/classic/products/payment-data-transfer/
 
-    context = context or {}
-    context.update({"failed": failed, "pdt_obj": pdt_obj})
-    return render(request, template, context)
-
-
-def process_pdt(request, item_check_callable=None):
-    """
-    Payment data transfer implementation: http://tinyurl.com/c9jjmw
     This function returns a tuple of (pdt_obj, failed)
     pdt_obj is an object of type PayPalPDT
     failed is a flag that is True if the input data didn't pass basic validation.
@@ -48,13 +37,16 @@ def process_pdt(request, item_check_callable=None):
                 try:
                     pdt_obj = form.save(commit=False)
                 except Exception as e:
+                    warn_untested()
                     error = repr(e)
                     failed = True
             else:
+                warn_untested()
                 error = form.errors
                 failed = True
 
             if failed:
+                warn_untested()
                 pdt_obj = PayPalPDT()
                 pdt_obj.set_flag("Invalid form. %s" % error)
 
@@ -62,7 +54,7 @@ def process_pdt(request, item_check_callable=None):
 
             if not failed:
                 # The PDT object gets saved during verify
-                pdt_obj.verify(item_check_callable)
+                pdt_obj.verify()
     else:
         pass  # we ignore any PDT requests that don't have a transaction id
 

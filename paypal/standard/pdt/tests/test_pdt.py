@@ -4,21 +4,23 @@ see http://www.djangoproject.com/documentation/testing/ for details
 """
 from __future__ import unicode_literals
 
+import mock
 from django.conf import settings
 from django.template.loader import render_to_string
 from django.test import TestCase
 from django.test.utils import override_settings
 
+from paypal.standard.conf import POSTBACK_ENDPOINT, SANDBOX_POSTBACK_ENDPOINT
 from paypal.standard.pdt.models import PayPalPDT
 
-from .settings import TEMPLATES, TEMPLATE_DIRS
+from .settings import TEMPLATES
 
 
 class DummyPayPalPDT(object):
     def __init__(self, update_context_dict={}):
         self.context_dict = {'st': 'SUCCESS', 'custom': 'cb736658-3aad-4694-956f-d0aeade80194',
                              'txn_id': '1ED550410S3402306', 'mc_gross': '225.00',
-                             'business': 'test@fake.com', 'error': 'Error code: 1234'}
+                             'business': 'test@example.com', 'error': 'Error code: 1234'}
 
         self.context_dict.update(update_context_dict)
         self.response = ''
@@ -37,8 +39,7 @@ class DummyPayPalPDT(object):
 
 
 @override_settings(ROOT_URLCONF="paypal.standard.pdt.tests.test_urls",
-                   TEMPLATES=TEMPLATES,
-                   TEMPLATE_DIRS=TEMPLATE_DIRS)
+                   TEMPLATES=TEMPLATES)
 class PDTTest(TestCase):
 
     def setUp(self):
@@ -83,7 +84,7 @@ class PDTTest(TestCase):
         self.assertEqual(pdt_obj.flag, False)
         paypal_response = self.client.get("/pdt/", self.get_params)
         self.assertContains(paypal_response, 'Transaction complete', status_code=200)
-        self.assertEqual(len(PayPalPDT.objects.all()), 1) # we don't create a new pdt        
+        self.assertEqual(len(PayPalPDT.objects.all()), 1)  # we don't create a new pdt
         pdt_obj = PayPalPDT.objects.all()[0]
         self.assertEqual(pdt_obj.flag, False)
 
@@ -102,3 +103,45 @@ class PDTTest(TestCase):
         self.assertEqual(len(PayPalPDT.objects.all()), 1)
         pdt_obj = PayPalPDT.objects.all()[0]
         self.assertEqual(pdt_obj.custom, self.get_params['cm'])
+
+
+class MockedResponse:
+    content = 'test'
+
+
+def mocked_post(*args, **kwargs):
+    url = args[0]
+    data = kwargs['data']
+
+    assert url == SANDBOX_POSTBACK_ENDPOINT
+    assert data['cmd'] == '_notify-synch'
+    assert 'at' in data
+    assert 'tx' in data
+
+    return MockedResponse()
+
+
+class PDTPostbackTest(TestCase):
+    """
+    Tests an actual postback to PayPal server.
+    """
+    @classmethod
+    def setUpClass(cls):
+        cls.pdt = PayPalPDT()
+
+    @classmethod
+    def tearDownClass(cls):
+        pass
+
+    @mock.patch('paypal.standard.pdt.models.requests.post', side_effect=mocked_post)
+    def test_postback(self, post):
+        response = self.pdt._postback()
+        self.assertEqual(response, MockedResponse.content)
+
+    def test_enpoint(self):
+        endpoint = self.pdt.get_endpoint()
+
+        if getattr(settings, 'PAYPAL_TEST', True):
+            self.assertEqual(endpoint, SANDBOX_POSTBACK_ENDPOINT)
+        else:
+            self.assertEqual(endpoint, POSTBACK_ENDPOINT)

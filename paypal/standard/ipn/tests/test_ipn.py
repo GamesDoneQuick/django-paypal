@@ -2,7 +2,6 @@ from __future__ import unicode_literals
 
 import locale
 import unittest
-import warnings
 from datetime import datetime
 from decimal import Decimal
 
@@ -10,29 +9,25 @@ from django.conf import settings
 from django.test import TestCase
 from django.test.utils import override_settings
 from django.utils import timezone
-from six import b, text_type
+from six import text_type
+from six.moves.urllib.parse import urlencode
 
 from paypal.standard.ipn.models import PayPalIPN
-from paypal.standard.ipn.signals import (invalid_ipn_received,
-                                         payment_was_flagged,
-                                         payment_was_refunded,
-                                         payment_was_reversed,
-                                         payment_was_successful,
-                                         recurring_cancel, recurring_create,
-                                         recurring_failed, recurring_payment,
-                                         recurring_skipped, valid_ipn_received)
+from paypal.standard.ipn.signals import invalid_ipn_received, valid_ipn_received
+from paypal.standard.ipn.views import CONTENT_TYPE_ERROR
 from paypal.standard.models import ST_PP_CANCELLED
-from six.moves.urllib.parse import urlencode
 
 # Parameters are all bytestrings, so we can construct a bytestring
 # request the same way that Paypal does.
+
+TEST_RECEIVER_EMAIL = b"seller@paypalsandbox.com"
 
 CHARSET = "windows-1252"
 IPN_POST_PARAMS = {
     "protection_eligibility": b"Ineligible",
     "last_name": b"User",
     "txn_id": b"51403485VH153354B",
-    "receiver_email": b(settings.PAYPAL_RECEIVER_EMAIL),
+    "receiver_email": TEST_RECEIVER_EMAIL,
     "payment_status": b"Completed",
     "payment_gross": b"10.00",
     "tax": b"0.00",
@@ -44,7 +39,7 @@ IPN_POST_PARAMS = {
     "payment_date": b"23:04:06 Feb 02, 2009 PST",
     "first_name": b"J\xF6rg",
     "item_name": b"",
-    "charset": b(CHARSET),
+    "charset": CHARSET.encode('ascii'),
     "custom": b"website_id=13&user_id=21",
     "notify_version": b"2.6",
     "transaction_subject": b"",
@@ -69,43 +64,14 @@ class ResetIPNSignalsMixin(object):
         super(ResetIPNSignalsMixin, self).setUp()
         self.valid_ipn_received_receivers = valid_ipn_received.receivers
         self.invalid_ipn_received_receivers = invalid_ipn_received.receivers
-        # Deprecated:
-        self.payment_was_successful_receivers = payment_was_successful.receivers
-        self.payment_was_flagged_receivers = payment_was_flagged.receivers
-        self.payment_was_refunded_receivers = payment_was_refunded.receivers
-        self.payment_was_reversed_receivers = payment_was_reversed.receivers
-        self.recurring_skipped_receivers = recurring_skipped.receivers
-        self.recurring_failed_receivers = recurring_failed.receivers
-        self.recurring_create_receivers = recurring_create.receivers
-        self.recurring_payment_receivers = recurring_payment.receivers
-        self.recurring_cancel_receivers = recurring_cancel.receivers
 
         valid_ipn_received.receivers = []
         invalid_ipn_received.receivers = []
-        # Deprecated:
-        payment_was_successful.receivers = []
-        payment_was_flagged.receivers = []
-        payment_was_refunded.receivers = []
-        payment_was_reversed.receivers = []
-        recurring_skipped.receivers = []
-        recurring_failed.receivers = []
-        recurring_create.receivers = []
-        recurring_payment.receivers = []
-        recurring_cancel.receivers = []
 
     def tearDown(self):
         valid_ipn_received.receivers = self.valid_ipn_received_receivers
         invalid_ipn_received.receivers = self.invalid_ipn_received_receivers
 
-        payment_was_successful.receivers = self.payment_was_successful_receivers
-        payment_was_flagged.receivers = self.payment_was_flagged_receivers
-        payment_was_refunded.receivers = self.payment_was_refunded_receivers
-        payment_was_reversed.receivers = self.payment_was_reversed_receivers
-        recurring_skipped.receivers = self.recurring_skipped_receivers
-        recurring_failed.receivers = self.recurring_failed_receivers
-        recurring_create.receivers = self.recurring_create_receivers
-        recurring_payment.receivers = self.recurring_payment_receivers
-        recurring_cancel.receivers = self.recurring_cancel_receivers
         super(ResetIPNSignalsMixin, self).tearDown()
 
 
@@ -121,7 +87,7 @@ class IPNUtilsMixin(ResetIPNSignalsMixin):
         post_data = urlencode(byte_params)
         return self.client.post("/ipn/", post_data, content_type='application/x-www-form-urlencoded')
 
-    def assertGotSignal(self, signal, flagged, params=IPN_POST_PARAMS, deprecated=False):
+    def assertGotSignal(self, signal, flagged, params=IPN_POST_PARAMS):
         # Check the signal was sent. These get lost if they don't reference self.
         self.got_signal = False
         self.signal_obj = None
@@ -130,12 +96,7 @@ class IPNUtilsMixin(ResetIPNSignalsMixin):
             self.got_signal = True
             self.signal_obj = sender
 
-        if deprecated:
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                signal.connect(handle_signal)
-        else:
-            signal.connect(handle_signal)
+        signal.connect(handle_signal)
 
         response = self.paypal_post(params)
         self.assertEqual(response.status_code, 200)
@@ -146,8 +107,6 @@ class IPNUtilsMixin(ResetIPNSignalsMixin):
 
         self.assertTrue(self.got_signal)
         self.assertEqual(self.signal_obj, ipn_obj)
-        if deprecated:
-            self.assertEqual(len([r for r in w if r.category == DeprecationWarning]), 1)
         return ipn_obj
 
     def assertFlagged(self, updates, flag_info):
@@ -182,51 +141,23 @@ class IPNTest(MockedPostbackMixin, IPNUtilsMixin, TestCase):
         self.assertEqual(ipn_obj.first_name, u"J\u00f6rg")
         # Check date parsing
         self.assertEqual(ipn_obj.payment_date,
-                         datetime(2009, 2, 3, 7, 4, 6, tzinfo=timezone.utc))
+                         datetime(2009, 2, 3, 7, 4, 6,
+                                  tzinfo=timezone.utc if settings.USE_TZ else None))
 
     def test_invalid_ipn_received(self):
         PayPalIPN._postback = lambda self: b"INVALID"
         self.assertGotSignal(invalid_ipn_received, True)
 
-    def test_payment_was_successful(self):
-        self.assertGotSignal(payment_was_successful, False, deprecated=True)
-
-    def test_payment_was_flagged(self):
-        PayPalIPN._postback = lambda self: b"INVALID"
-        self.assertGotSignal(payment_was_flagged, True, deprecated=True)
-
-    def test_refunded_ipn(self):
-        update = {
-            "payment_status": "Refunded"
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(payment_was_refunded, False, params, deprecated=True)
-
-    def test_with_na_date(self):
-        update = {
-            "payment_status": "Refunded",
-            "time_created": "N/A"
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(payment_was_refunded, False, params, deprecated=True)
-
-    def test_reversed_ipn(self):
-        update = {
-            "payment_status": "Reversed"
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(payment_was_reversed, False, params, deprecated=True)
-
-    def test_incorrect_receiver_email(self):
-        update = {"receiver_email": "incorrect_email@someotherbusiness.com"}
-        flag_info = "Invalid receiver_email. (incorrect_email@someotherbusiness.com)"
-        self.assertFlagged(update, flag_info)
+    def test_reverify_ipn(self):
+        PayPalIPN._postback = lambda self: b"Internal Server Error"
+        self.paypal_post(IPN_POST_PARAMS)
+        ipn_obj = PayPalIPN.objects.all()[0]
+        self.assertEqual(ipn_obj.flag, True)
+        PayPalIPN._postback = lambda self: b"VERIFIED"
+        ipn_obj.verify()
+        self.assertEqual(ipn_obj.flag, False)
+        self.assertEqual(ipn_obj.flag_info, "")
+        self.assertEqual(ipn_obj.flag_code, "")
 
     def test_invalid_payment_status(self):
         update = {"payment_status": "Failure"}
@@ -250,79 +181,15 @@ class IPNTest(MockedPostbackMixin, IPNUtilsMixin, TestCase):
         self.assertEqual(ipn_obj.flag, True)
         self.assertEqual(ipn_obj.flag_info, "Duplicate txn_id. (51403485VH153354B)")
 
-    def test_recurring_payment_skipped_ipn(self):
-        update = {
-            "recurring_payment_id": "BN5JZ2V7MLEV4",
-            "txn_type": "recurring_payment_skipped",
-            "txn_id": ""
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(recurring_skipped, False, params, deprecated=True)
-
-    def test_recurring_payment_failed_ipn(self):
-        update = {
-            "recurring_payment_id": "BN5JZ2V7MLEV4",
-            "txn_type": "recurring_payment_failed",
-            "txn_id": ""
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(recurring_failed, False, params, deprecated=True)
-
-    def test_recurring_payment_create_ipn(self):
-        update = {
-            "recurring_payment_id": "BN5JZ2V7MLEV4",
-            "txn_type": "recurring_payment_profile_created",
-            "txn_id": ""
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(recurring_create, False, params, deprecated=True)
-
-    def test_recurring_payment_cancel_ipn(self):
-        update = {
-            "recurring_payment_id": "BN5JZ2V7MLEV4",
-            "txn_type": "recurring_payment_profile_cancel",
-            "txn_id": ""
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.assertGotSignal(recurring_cancel, False, params, deprecated=True)
-
-    def test_recurring_payment_ipn(self):
-        """
-        The wat the code is written in
-        PayPalIPN.send_signals the recurring_payment
-        will never be sent because the paypal ipn
-        contains a txn_id, if this test failes you
-        might break some compatibility
-        """
-        update = {
-            "recurring_payment_id": "BN5JZ2V7MLEV4",
-            "txn_type": "recurring_payment",
-        }
-        params = IPN_POST_PARAMS.copy()
-        params.update(update)
-
-        self.got_signal = False
-        self.signal_obj = None
-
-        def handle_signal(sender, **kwargs):
-            self.got_signal = True
-            self.signal_obj = sender
-
-        with warnings.catch_warnings(record=True):
-            recurring_payment.connect(handle_signal)
-        response = self.paypal_post(params)
-        self.assertEqual(response.status_code, 200)
-        ipns = PayPalIPN.objects.all()
-        self.assertEqual(len(ipns), 1)
-        self.assertFalse(self.got_signal)
+    def test_duplicate_txn_id_with_first_flagged(self):
+        PayPalIPN._postback = lambda self: b"Internal Server Error"
+        self.paypal_post(IPN_POST_PARAMS)
+        PayPalIPN._postback = lambda self: b"VERIFIED"
+        self.paypal_post(IPN_POST_PARAMS)
+        self.assertEqual(len(PayPalIPN.objects.all()), 2)
+        ipn_objs = PayPalIPN.objects.order_by('created_at', 'pk')
+        self.assertEqual(ipn_objs[0].flag, True)
+        self.assertEqual(ipn_objs[1].flag, False)
 
     def test_posted_params_attribute(self):
         params = {'btn_id1': b"3453595",
@@ -371,21 +238,105 @@ class IPNTest(MockedPostbackMixin, IPNUtilsMixin, TestCase):
 
     def test_paypal_date_format(self):
         update = {
-            "next_payment_date": b("23:04:06 Feb 02, 2009 PST"),
-            "subscr_date": b("23:04:06 Jan 02, 2009 PST"),
-            "subscr_effective": b("23:04:06 Jan 02, 2009 PST"),
-            "auction_closing_date": b("23:04:06 Jan 02, 2009 PST"),
-            "retry_at": b("23:04:06 Jan 02, 2009 PST"),
+            "next_payment_date": b"23:04:06 Feb 02, 2009 PST",
+            "subscr_date": b"23:04:06 Jan 02, 2009 PST",
+            "subscr_effective": b"23:04:06 Jan 02, 2009 PST",
+            "auction_closing_date": b"23:04:06 Jan 02, 2009 PST",
+            "retry_at": b"23:04:06 Jan 02, 2009 PST",
             # test parsing times in PST/PDT change period
-            "case_creation_date": b("01:13:05 Nov 01, 2015 PST"),
-            "time_created": b("01:13:05 Nov 01, 2015 PDT"),
+            "case_creation_date": b"01:13:05 Nov 01, 2015 PST",
+            "time_created": b"01:13:05 Nov 01, 2015 PDT",
         }
 
         params = IPN_POST_PARAMS.copy()
         params.update(update)
 
-        response = self.paypal_post(params)
+        self.paypal_post(params)
         self.assertFalse(PayPalIPN.objects.get().flag)
+
+    def test_paypal_date_invalid_format(self):
+        params = IPN_POST_PARAMS.copy()
+        params.update({"time_created": b"2015-10-25 01:21:32"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertIn(
+            PayPalIPN.objects.latest('id').flag_info,
+            ['Invalid form. (time_created: Invalid date format '
+             '2015-10-25 01:21:32: need more than 2 values to unpack)',
+             'Invalid form. (time_created: Invalid date format '
+             '2015-10-25 01:21:32: not enough values to unpack '
+             '(expected 5, got 2))'
+             ]
+        )
+
+        # day not int convertible
+        params = IPN_POST_PARAMS.copy()
+        params.update({"payment_date": b"01:21:32 Jan 25th 2015 PDT"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertEqual(
+            PayPalIPN.objects.latest('id').flag_info,
+            "Invalid form. (payment_date: Invalid date format "
+            "01:21:32 Jan 25th 2015 PDT: invalid literal for int() with "
+            "base 10: '25th')"
+        )
+
+        # month not in Mmm format
+        params = IPN_POST_PARAMS.copy()
+        params.update({"next_payment_date": b"01:21:32 01 25 2015 PDT"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertIn(
+            PayPalIPN.objects.latest('id').flag_info,
+            ["Invalid form. (next_payment_date: Invalid date format "
+             "01:21:32 01 25 2015 PDT: u'01' is not in list)",
+             "Invalid form. (next_payment_date: Invalid date format "
+             "01:21:32 01 25 2015 PDT: '01' is not in list)"]
+        )
+
+        # month not in Mmm format
+        params = IPN_POST_PARAMS.copy()
+        params.update({"retry_at": b"01:21:32 January 25 2015 PDT"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertIn(
+            PayPalIPN.objects.latest('id').flag_info,
+            ["Invalid form. (retry_at: Invalid date format "
+             "01:21:32 January 25 2015 PDT: u'January' is not in list)",
+             "Invalid form. (retry_at: Invalid date format "
+             "01:21:32 January 25 2015 PDT: 'January' is not in list)"]
+        )
+
+        # no seconds in time part
+        params = IPN_POST_PARAMS.copy()
+        params.update({"subscr_date": b"01:28 Jan 25 2015 PDT"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertIn(
+            PayPalIPN.objects.latest('id').flag_info,
+            ["Invalid form. (subscr_date: Invalid date format "
+             "01:28 Jan 25 2015 PDT: need more than 2 values to unpack)",
+             "Invalid form. (subscr_date: Invalid date format "
+             "01:28 Jan 25 2015 PDT: not enough values to unpack "
+             "(expected 3, got 2))"]
+        )
+
+        # string not valid datetime
+        params = IPN_POST_PARAMS.copy()
+        params.update({"case_creation_date": b"01:21:32 Jan 49 2015 PDT"})
+        self.paypal_post(params)
+        self.assertTrue(PayPalIPN.objects.latest('id').flag)
+        self.assertEqual(
+            PayPalIPN.objects.latest('id').flag_info,
+            "Invalid form. (case_creation_date: Invalid date format "
+            "01:21:32 Jan 49 2015 PDT: day is out of range for month)"
+        )
+
+    def test_content_type_validation(self):
+        with self.assertRaises(AssertionError) as assert_context:
+            self.client.post("/ipn/", {}, content_type='application/json')
+        self.assertIn(CONTENT_TYPE_ERROR, repr(assert_context.exception)),
+        self.assertFalse(PayPalIPN.objects.exists())
 
 
 @override_settings(ROOT_URLCONF='paypal.standard.ipn.tests.test_urls')
@@ -409,7 +360,8 @@ class IPNLocaleTest(IPNUtilsMixin, MockedPostbackMixin, TestCase):
         self.assertEqual(ipn_obj.last_name, u"User")
         # Check date parsing
         self.assertEqual(ipn_obj.payment_date,
-                         datetime(2009, 2, 3, 7, 4, 6, tzinfo=timezone.utc))
+                         datetime(2009, 2, 3, 7, 4, 6,
+                                  tzinfo=timezone.utc if settings.USE_TZ else None))
 
 
 @override_settings(ROOT_URLCONF='paypal.standard.ipn.tests.test_urls')
@@ -422,8 +374,7 @@ class IPNPostbackTest(IPNUtilsMixin, TestCase):
         self.assertFlagged({}, u'Invalid postback. (INVALID)')
 
 
-@override_settings(ROOT_URLCONF='paypal.standard.ipn.tests.test_urls',
-                   PAYPAL_RECEIVER_EMAIL='seller@paypalsandbox.com')
+@override_settings(ROOT_URLCONF='paypal.standard.ipn.tests.test_urls')
 class IPNSimulatorTests(TestCase):
 
     # Some requests, as sent by the simulator.
@@ -440,17 +391,38 @@ class IPNSimulatorTests(TestCase):
         return self.client.post("/ipn/", post_data, content_type='application/x-www-form-urlencoded')
 
     def test_valid_webaccept(self):
-        paypal_input = b'payment_type=instant&payment_date=23%3A04%3A06%20Feb%2002%2C%202009%20PDT&payment_status=Completed&address_status=confirmed&payer_status=verified&first_name=John&last_name=Smith&payer_email=buyer%40paypalsandbox.com&payer_id=TESTBUYERID01&address_name=John%20Smith&address_country=United%20States&address_country_code=US&address_zip=95131&address_state=CA&address_city=San%20Jose&address_street=123%20any%20street&business=seller%40paypalsandbox.com&receiver_email=seller%40paypalsandbox.com&receiver_id=seller%40paypalsandbox.com&residence_country=US&item_name=something&item_number=AK-1234&quantity=1&shipping=3.04&tax=2.02&mc_currency=USD&mc_fee=0.44&mc_gross=12.34&mc_gross1=12.34&txn_type=web_accept&txn_id=593976436&notify_version=2.1&custom=xyz123&invoice=abc1234&test_ipn=1&verify_sign=AFcWxV21C7fd0v3bYYYRCpSSRl31Awsh54ABFpebxm5s9x58YIW-AWIb'
+        paypal_input = b'payment_type=instant&payment_date=23%3A04%3A06%20Feb%2002%2C%202009%20PDT&' \
+                       b'payment_status=Completed&address_status=confirmed&payer_status=verified&' \
+                       b'first_name=John&last_name=Smith&payer_email=buyer%40paypalsandbox.com&' \
+                       b'payer_id=TESTBUYERID01&address_name=John%20Smith&address_country=United%20States&' \
+                       b'address_country_code=US&address_zip=95131&address_state=CA&address_city=San%20Jose&' \
+                       b'address_street=123%20any%20street&business=seller%40paypalsandbox.com&' \
+                       b'receiver_email=seller%40paypalsandbox.com&receiver_id=seller%40paypalsandbox.com&' \
+                       b'residence_country=US&item_name=something&item_number=AK-1234&quantity=1&shipping=3.04&' \
+                       b'tax=2.02&mc_currency=USD&mc_fee=0.44&mc_gross=12.34&mc_gross1=12.34&txn_type=web_accept&' \
+                       b'txn_id=593976436&notify_version=2.1&custom=xyz123&invoice=abc1234&test_ipn=1&' \
+                       b'verify_sign=AFcWxV21C7fd0v3bYYYRCpSSRl31Awsh54ABFpebxm5s9x58YIW-AWIb'
         response = self.post_to_ipn_handler(paypal_input)
         self.assertEqual(response.status_code, 200)
         ipn = self.get_ipn()
         self.assertFalse(ipn.flag)
         self.assertEqual(ipn.mc_gross, Decimal("12.34"))
         # For tests, we get conversion to UTC because this is all SQLite supports.
-        self.assertEqual(ipn.payment_date, datetime(2009, 2, 3, 7, 4, 6, tzinfo=timezone.UTC()))
+        self.assertEqual(ipn.payment_date, datetime(2009, 2, 3, 7, 4, 6,
+                                                    tzinfo=timezone.utc if settings.USE_TZ else None))
 
     def test_declined(self):
-        paypal_input = b'payment_type=instant&payment_date=23%3A04%3A06%20Feb%2002%2C%202009%20PDT&payment_status=Declined&address_status=confirmed&payer_status=verified&first_name=John&last_name=Smith&payer_email=buyer%40paypalsandbox.com&payer_id=TESTBUYERID01&address_name=John%20Smith&address_country=United%20States&address_country_code=US&address_zip=95131&address_state=CA&address_city=San%20Jose&address_street=123%20any%20street&business=seller%40paypalsandbox.com&receiver_email=seller%40paypalsandbox.com&receiver_id=seller%40paypalsandbox.com&residence_country=US&item_name=something&item_number=AK-1234&quantity=1&shipping=3.04&tax=2.02&mc_currency=USD&mc_fee=0.44&mc_gross=131.22&mc_gross1=131.22&txn_type=web_accept&txn_id=153826001&notify_version=2.1&custom=xyz123&invoice=abc1234&test_ipn=1&verify_sign=AiPC9BjkCyDFQXbSkoZcgqH3hpacAIG977yabdROlR9d0bf98jevF2-i'
+        paypal_input = b'payment_type=instant&payment_date=23%3A04%3A06%20Feb%2002%2C%202009%20PDT&' \
+                       b'payment_status=Declined&address_status=confirmed&payer_status=verified&' \
+                       b'first_name=John&last_name=Smith&payer_email=buyer%40paypalsandbox.com&' \
+                       b'payer_id=TESTBUYERID01&address_name=John%20Smith&address_country=United%20States&' \
+                       b'address_country_code=US&address_zip=95131&address_state=CA&address_city=San%20Jose&' \
+                       b'address_street=123%20any%20street&business=seller%40paypalsandbox.com&' \
+                       b'receiver_email=seller%40paypalsandbox.com&receiver_id=seller%40paypalsandbox.com&' \
+                       b'residence_country=US&item_name=something&item_number=AK-1234&quantity=1&shipping=3.04&' \
+                       b'tax=2.02&mc_currency=USD&mc_fee=0.44&mc_gross=131.22&mc_gross1=131.22&txn_type=web_accept&' \
+                       b'txn_id=153826001&notify_version=2.1&custom=xyz123&invoice=abc1234&test_ipn=1&' \
+                       b'verify_sign=AiPC9BjkCyDFQXbSkoZcgqH3hpacAIG977yabdROlR9d0bf98jevF2-i'
         self.post_to_ipn_handler(paypal_input)
         ipn = self.get_ipn()
         self.assertFalse(ipn.flag)

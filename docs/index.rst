@@ -20,7 +20,8 @@ Contents:
    pro/index
    tests
    release_notes
-
+   updatedb
+   settings
 
 
 Indices and tables
